@@ -2,14 +2,15 @@ import os
 import time
 import asyncio
 import importlib.util
-from fastapi import FastAPI
-import uvicorn
 import threading
 
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.client.default import DefaultBotProperties
+
+from fastapi import FastAPI
+import uvicorn
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -36,9 +37,9 @@ bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 client = AsyncIOMotorClient(MONGO_URL)
-db = client["master_bot"]
+db = client["file_bot"]
+
 files_col = db["files"]
-users_col = db["users"]
 
 START_TIME = time.time()
 
@@ -89,37 +90,21 @@ def load_plugins():
     return router
 
 # ======================
-# USER SAVE
-# ======================
-
-async def save_user(user):
-    await users_col.update_one(
-        {"id": user.id},
-        {"$setOnInsert": {
-            "id": user.id,
-            "username": user.username
-        }},
-        upsert=True
-    )
-
-# ======================
 # START
 # ======================
 
 @dp.message(Command("start"))
 async def start(m: types.Message):
 
-    await save_user(m.from_user)
-
     if m.from_user.id == ADMIN_ID:
         return await m.answer(
             "💀 ADMIN PANEL\n"
             "━━━━━━━━━━━━━━\n"
-            "/panel - control\n"
-            "/files - list files"
+            "/panel - open panel\n"
+            "/files - file list"
         )
 
-    await m.answer("⚡ Bot Active")
+    await m.answer("⚡ Bot Running")
 
 # ======================
 # PANEL
@@ -137,89 +122,109 @@ async def panel(m: types.Message):
         [InlineKeyboardButton(text="⏱ Uptime", callback_data="uptime")]
     ])
 
-    await m.answer("💀 MASTER PANEL", reply_markup=kb)
+    await m.answer("💀 CONTROL PANEL", reply_markup=kb)
 
 # ======================
-# FILE LIST
+# FILE LIST (DB FIXED)
 # ======================
 
-@dp.callback_query(F.data == "files")
-async def files(c: types.CallbackQuery):
+@dp.message(Command("files"))
+async def files(m: types.Message):
 
-    files = os.listdir(BASE_DIR)
+    if m.from_user.id != ADMIN_ID:
+        return
 
-    if not files:
-        return await c.message.edit_text("📂 Empty")
+    data = await files_col.find({}).to_list(length=50)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f, callback_data=f"file:{f}")]
-        for f in files
-    ])
+    if not data:
+        return await m.answer("📂 No files")
 
-    await c.message.edit_text("📂 FILES", reply_markup=kb)
+    text = "📁 FILES:\n\n"
 
-# ======================
-# FILE MENU
-# ======================
+    for f in data:
+        text += f"📄 {f['name']}\n"
 
-@dp.callback_query(F.data.startswith("file:"))
-async def file_menu(c: types.CallbackQuery):
-
-    name = c.data.split(":")[1]
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📥 Download", callback_data=f"dl:{name}")],
-        [InlineKeyboardButton(text="🗑 Delete", callback_data=f"del:{name}")],
-        [InlineKeyboardButton(text="👁 View", callback_data=f"view:{name}")]
-    ])
-
-    await c.message.edit_text(f"📄 {name}", reply_markup=kb)
+    await m.answer(text)
 
 # ======================
-# DOWNLOAD
+# FILE VIEW
 # ======================
 
-@dp.callback_query(F.data.startswith("dl:"))
-async def download(c: types.CallbackQuery):
+@dp.message(Command("view"))
+async def view(m: types.Message):
 
-    name = c.data.split(":")[1]
-    path = f"{BASE_DIR}/{name}"
+    if m.from_user.id != ADMIN_ID:
+        return
 
-    if os.path.exists(path):
-        await c.message.answer_document(FSInputFile(path))
+    args = m.text.split()
+    if len(args) < 2:
+        return await m.answer("Usage: /view file.txt")
+
+    path = f"{BASE_DIR}/{args[1]}"
+
+    if not os.path.exists(path):
+        return await m.answer("❌ Not found")
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = f.read()
+
+    await m.answer(data[:3500])
 
 # ======================
 # DELETE
 # ======================
 
-@dp.callback_query(F.data.startswith("del:"))
-async def delete(c: types.CallbackQuery):
+@dp.message(Command("delete"))
+async def delete(m: types.Message):
 
-    name = c.data.split(":")[1]
-    path = f"{BASE_DIR}/{name}"
+    if m.from_user.id != ADMIN_ID:
+        return
+
+    args = m.text.split()
+    if len(args) < 2:
+        return await m.answer("Usage: /delete file.txt")
+
+    path = f"{BASE_DIR}/{args[1]}"
 
     if os.path.exists(path):
         os.remove(path)
-        await c.message.edit_text("🗑 Deleted")
+        await files_col.delete_one({"name": args[1]})
+        return await m.answer("🗑 Deleted")
+
+    await m.answer("❌ Not found")
 
 # ======================
-# VIEW
+# RENAME
 # ======================
 
-@dp.callback_query(F.data.startswith("view:"))
-async def view(c: types.CallbackQuery):
+@dp.message(Command("rename"))
+async def rename(m: types.Message):
 
-    name = c.data.split(":")[1]
-    path = f"{BASE_DIR}/{name}"
+    if m.from_user.id != ADMIN_ID:
+        return
 
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            data = f.read()
+    args = m.text.split()
 
-        await c.message.answer(data[:3500])
+    if len(args) < 3:
+        return await m.answer("Usage: /rename old new")
+
+    old = f"{BASE_DIR}/{args[1]}"
+    new = f"{BASE_DIR}/{args[2]}"
+
+    if os.path.exists(old):
+        os.rename(old, new)
+
+        await files_col.update_one(
+            {"name": args[1]},
+            {"$set": {"name": args[2]}}
+        )
+
+        return await m.answer("✏️ Renamed")
+
+    await m.answer("❌ Not found")
 
 # ======================
-# UPLOAD (FILES + PLUGINS + DB)
+# UPLOAD (FINAL FIXED)
 # ======================
 
 @dp.message(F.document)
@@ -247,15 +252,15 @@ async def upload(m: types.Message):
 
         if name.endswith(".py"):
             load_plugins()
-            await msg.edit_text(f"🔌 Plugin Loaded: {name}")
-        else:
-            await msg.edit_text(f"📂 Uploaded: {name}")
+            return await msg.edit_text(f"🔌 Plugin Loaded: {name}")
+
+        await msg.edit_text(f"📂 Uploaded: {name}")
 
     except Exception as e:
         await msg.edit_text(f"❌ Error: {e}")
 
 # ======================
-# RELOAD PLUGINS
+# RELOAD
 # ======================
 
 @dp.callback_query(F.data == "reload")
