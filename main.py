@@ -1,17 +1,15 @@
 import os
 import asyncio
-import importlib.util
-import threading
 import time
-import requests
+import importlib.util
+from fastapi import FastAPI
+import uvicorn
+import threading
 
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.client.default import DefaultBotProperties
-
-from fastapi import FastAPI
-import uvicorn
 
 # ======================
 # CONFIG
@@ -29,12 +27,11 @@ os.makedirs(PLUGIN_DIR, exist_ok=True)
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
-plugin_router = Router()
 
-EDIT_MODE = {}
+START_TIME = time.time()
 
 # ======================
-# FASTAPI (ANTI SLEEP)
+# WEB (ANTI SLEEP + UPTIME)
 # ======================
 
 app = FastAPI()
@@ -51,32 +48,21 @@ def run_web():
     uvicorn.run(app, host="0.0.0.0", port=PORT)
 
 # ======================
-# SELF PING LOOP
+# PLUGIN SYSTEM
 # ======================
 
-async def self_ping():
-    url = os.environ.get("SELF_URL")
-    if not url:
-        return
-
-    while True:
-        try:
-            requests.get(url + "/ping")
-        except:
-            pass
-        await asyncio.sleep(240)
-
-# ======================
-# LOAD PLUGINS
-# ======================
+plugin_router = Router()
 
 def load_plugins():
     global plugin_router
+
     new_router = Router()
+    count = 0
 
     for file in os.listdir(PLUGIN_DIR):
         if file.endswith(".py"):
             path = f"{PLUGIN_DIR}/{file}"
+
             try:
                 spec = importlib.util.spec_from_file_location(file, path)
                 module = importlib.util.module_from_spec(spec)
@@ -84,6 +70,7 @@ def load_plugins():
 
                 if hasattr(module, "register_plugin"):
                     module.register_plugin(new_router)
+                    count += 1
 
             except Exception as e:
                 print("PLUGIN ERROR:", e)
@@ -91,15 +78,24 @@ def load_plugins():
     plugin_router = new_router
     dp.include_router(plugin_router)
 
+    return count
+
 # ======================
 # START
 # ======================
 
 @dp.message(Command("start"))
 async def start(m: types.Message):
+
     if m.from_user.id == ADMIN_ID:
-        return await m.answer("💀 ULTRA PANEL → /panel")
-    await m.answer("⚡ Bot running")
+        return await m.answer(
+            "💀 <b>ADMIN PANEL ACTIVE</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "/panel - control panel\n"
+            "/files - file list"
+        )
+
+    await m.answer("⚡ Bot Running")
 
 # ======================
 # PANEL
@@ -113,7 +109,8 @@ async def panel(m: types.Message):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📂 Files", callback_data="files")],
-        [InlineKeyboardButton(text="🔌 Plugins", callback_data="plugins")]
+        [InlineKeyboardButton(text="🔌 Plugins", callback_data="plugins")],
+        [InlineKeyboardButton(text="⏱ Uptime", callback_data="uptime")]
     ])
 
     await m.answer("💀 CONTROL PANEL", reply_markup=kb)
@@ -123,7 +120,7 @@ async def panel(m: types.Message):
 # ======================
 
 @dp.callback_query(F.data == "files")
-async def files_menu(c: types.CallbackQuery):
+async def files(c: types.CallbackQuery):
 
     files = os.listdir(BASE_DIR)
 
@@ -149,8 +146,7 @@ async def file_menu(c: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📥 Download", callback_data=f"dl:{name}")],
         [InlineKeyboardButton(text="🗑 Delete", callback_data=f"del:{name}")],
-        [InlineKeyboardButton(text="👁 View", callback_data=f"view:{name}")],
-        [InlineKeyboardButton(text="✏️ Edit", callback_data=f"edit:{name}")]
+        [InlineKeyboardButton(text="👁 View", callback_data=f"view:{name}")]
     ])
 
     await c.message.edit_text(f"📄 {name}", reply_markup=kb)
@@ -161,8 +157,10 @@ async def file_menu(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("dl:"))
 async def download(c: types.CallbackQuery):
+
     name = c.data.split(":")[1]
     path = f"{BASE_DIR}/{name}"
+
     if os.path.exists(path):
         await c.message.answer_document(FSInputFile(path))
 
@@ -172,8 +170,10 @@ async def download(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("del:"))
 async def delete(c: types.CallbackQuery):
+
     name = c.data.split(":")[1]
     path = f"{BASE_DIR}/{name}"
+
     if os.path.exists(path):
         os.remove(path)
         await c.message.edit_text("🗑 Deleted")
@@ -184,47 +184,18 @@ async def delete(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("view:"))
 async def view(c: types.CallbackQuery):
+
     name = c.data.split(":")[1]
     path = f"{BASE_DIR}/{name}"
 
-    if not os.path.exists(path):
-        return await c.answer("Not found")
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = f.read()
 
-    with open(path, "r", encoding="utf-8") as f:
-        data = f.read()
-
-    await c.message.answer(data[:3000])
+        await c.message.answer(data[:3500])
 
 # ======================
-# EDIT SYSTEM
-# ======================
-
-@dp.callback_query(F.data.startswith("edit:"))
-async def edit_start(c: types.CallbackQuery):
-
-    name = c.data.split(":")[1]
-    EDIT_MODE[c.from_user.id] = name
-
-    await c.message.answer("✏️ Send new content for file")
-
-@dp.message()
-async def handle_edit(m: types.Message):
-
-    if m.from_user.id not in EDIT_MODE:
-        return
-
-    name = EDIT_MODE[m.from_user.id]
-    path = f"{BASE_DIR}/{name}"
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(m.text)
-
-    del EDIT_MODE[m.from_user.id]
-
-    await m.answer("✅ File Updated")
-
-# ======================
-# UPLOAD
+# UPLOAD (FILES + PLUGINS)
 # ======================
 
 @dp.message(F.document)
@@ -236,39 +207,69 @@ async def upload(m: types.Message):
     file = m.document
     name = file.file_name
 
-    if name.endswith(".py"):
-        path = f"{PLUGIN_DIR}/{name}"
-    else:
-        path = f"{BASE_DIR}/{name}"
+    msg = await m.answer("⏳ Uploading...")
 
-    tg = await bot.get_file(file.file_id)
-    await bot.download_file(tg.file_path, path)
+    try:
+        if name.endswith(".py"):
+            path = f"{PLUGIN_DIR}/{name}"
+        else:
+            path = f"{BASE_DIR}/{name}"
 
-    if name.endswith(".py"):
-        load_plugins()
-        return await m.answer("🔌 Plugin Loaded")
+        tg = await bot.get_file(file.file_id)
+        await bot.download_file(tg.file_path, path)
 
-    await m.answer("📂 File Uploaded")
+        if name.endswith(".py"):
+            load_plugins()
+            return await msg.edit_text(f"🔌 Plugin Loaded: {name}")
+
+        await msg.edit_text(f"📂 Uploaded: {name}")
+
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {e}")
 
 # ======================
-# RUN
+# UPTIME
+# ======================
+
+@dp.message(Command("uptime"))
+async def uptime(m: types.Message):
+
+    up = int(time.time() - START_TIME)
+    await m.answer(f"⏱ Uptime: {up}s")
+
+# ======================
+# PANEL CALLBACK
+# ======================
+
+@dp.callback_query(F.data == "uptime")
+async def uptime_cb(c: types.CallbackQuery):
+
+    up = int(time.time() - START_TIME)
+    await c.message.edit_text(f"⏱ Uptime: {up}s")
+
+# ======================
+# BOT LOOP SAFE
 # ======================
 
 async def run_bot():
     while True:
         try:
             await dp.start_polling(bot)
-        except:
+        except Exception as e:
+            print("RESTART:", e)
             await asyncio.sleep(3)
 
+# ======================
+# MAIN
+# ======================
+
 async def main():
+
     load_plugins()
+
     threading.Thread(target=run_web, daemon=True).start()
 
-    await asyncio.gather(
-        run_bot(),
-        self_ping()
-    )
+    await run_bot()
 
 if __name__ == "__main__":
     asyncio.run(main())
