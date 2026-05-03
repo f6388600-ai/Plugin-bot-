@@ -1,6 +1,6 @@
 import os
-import asyncio
 import time
+import asyncio
 import importlib.util
 from fastapi import FastAPI
 import uvicorn
@@ -11,12 +11,15 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.client.default import DefaultBotProperties
 
+from motor.motor_asyncio import AsyncIOMotorClient
+
 # ======================
 # CONFIG
 # ======================
 
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+MONGO_URL = os.environ.get("MONGO_URL")
 PORT = int(os.environ.get("PORT", 10000))
 
 BASE_DIR = "files"
@@ -25,13 +28,22 @@ PLUGIN_DIR = "plugins"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(PLUGIN_DIR, exist_ok=True)
 
+# ======================
+# BOT + DB
+# ======================
+
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
+
+client = AsyncIOMotorClient(MONGO_URL)
+db = client["master_bot"]
+files_col = db["files"]
+users_col = db["users"]
 
 START_TIME = time.time()
 
 # ======================
-# WEB (ANTI SLEEP + UPTIME)
+# WEB (ANTI SLEEP)
 # ======================
 
 app = FastAPI()
@@ -56,8 +68,7 @@ plugin_router = Router()
 def load_plugins():
     global plugin_router
 
-    new_router = Router()
-    count = 0
+    router = Router()
 
     for file in os.listdir(PLUGIN_DIR):
         if file.endswith(".py"):
@@ -69,16 +80,27 @@ def load_plugins():
                 spec.loader.exec_module(module)
 
                 if hasattr(module, "register_plugin"):
-                    module.register_plugin(new_router)
-                    count += 1
+                    module.register_plugin(router)
 
             except Exception as e:
                 print("PLUGIN ERROR:", e)
 
-    plugin_router = new_router
-    dp.include_router(plugin_router)
+    plugin_router = router
+    return router
 
-    return count
+# ======================
+# USER SAVE
+# ======================
+
+async def save_user(user):
+    await users_col.update_one(
+        {"id": user.id},
+        {"$setOnInsert": {
+            "id": user.id,
+            "username": user.username
+        }},
+        upsert=True
+    )
 
 # ======================
 # START
@@ -87,15 +109,17 @@ def load_plugins():
 @dp.message(Command("start"))
 async def start(m: types.Message):
 
+    await save_user(m.from_user)
+
     if m.from_user.id == ADMIN_ID:
         return await m.answer(
-            "💀 <b>ADMIN PANEL ACTIVE</b>\n"
+            "💀 ADMIN PANEL\n"
             "━━━━━━━━━━━━━━\n"
-            "/panel - control panel\n"
-            "/files - file list"
+            "/panel - control\n"
+            "/files - list files"
         )
 
-    await m.answer("⚡ Bot Running")
+    await m.answer("⚡ Bot Active")
 
 # ======================
 # PANEL
@@ -109,11 +133,11 @@ async def panel(m: types.Message):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📂 Files", callback_data="files")],
-        [InlineKeyboardButton(text="🔌 Plugins", callback_data="plugins")],
+        [InlineKeyboardButton(text="🔌 Reload Plugins", callback_data="reload")],
         [InlineKeyboardButton(text="⏱ Uptime", callback_data="uptime")]
     ])
 
-    await m.answer("💀 CONTROL PANEL", reply_markup=kb)
+    await m.answer("💀 MASTER PANEL", reply_markup=kb)
 
 # ======================
 # FILE LIST
@@ -195,7 +219,7 @@ async def view(c: types.CallbackQuery):
         await c.message.answer(data[:3500])
 
 # ======================
-# UPLOAD (FILES + PLUGINS)
+# UPLOAD (FILES + PLUGINS + DB)
 # ======================
 
 @dp.message(F.document)
@@ -210,39 +234,42 @@ async def upload(m: types.Message):
     msg = await m.answer("⏳ Uploading...")
 
     try:
-        if name.endswith(".py"):
-            path = f"{PLUGIN_DIR}/{name}"
-        else:
-            path = f"{BASE_DIR}/{name}"
+        path = f"{PLUGIN_DIR}/{name}" if name.endswith(".py") else f"{BASE_DIR}/{name}"
 
         tg = await bot.get_file(file.file_id)
         await bot.download_file(tg.file_path, path)
 
+        await files_col.insert_one({
+            "name": name,
+            "path": path,
+            "time": time.time()
+        })
+
         if name.endswith(".py"):
             load_plugins()
-            return await msg.edit_text(f"🔌 Plugin Loaded: {name}")
-
-        await msg.edit_text(f"📂 Uploaded: {name}")
+            await msg.edit_text(f"🔌 Plugin Loaded: {name}")
+        else:
+            await msg.edit_text(f"📂 Uploaded: {name}")
 
     except Exception as e:
         await msg.edit_text(f"❌ Error: {e}")
 
 # ======================
+# RELOAD PLUGINS
+# ======================
+
+@dp.callback_query(F.data == "reload")
+async def reload(c: types.CallbackQuery):
+
+    load_plugins()
+    await c.message.edit_text("🔄 Plugins Reloaded")
+
+# ======================
 # UPTIME
 # ======================
 
-@dp.message(Command("uptime"))
-async def uptime(m: types.Message):
-
-    up = int(time.time() - START_TIME)
-    await m.answer(f"⏱ Uptime: {up}s")
-
-# ======================
-# PANEL CALLBACK
-# ======================
-
 @dp.callback_query(F.data == "uptime")
-async def uptime_cb(c: types.CallbackQuery):
+async def uptime(c: types.CallbackQuery):
 
     up = int(time.time() - START_TIME)
     await c.message.edit_text(f"⏱ Uptime: {up}s")
