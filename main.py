@@ -8,7 +8,7 @@ from flask import Flask
 from threading import Thread
 
 # --- ⚙️ CONFIGURATION ---
-API_TOKEN = '8523644793:AAGqHoxIdblgyCKvucU-5exjaaSweSaFvEc'
+API_TOKEN = '8523644793:AAEer9gT4sDYvPL6LXzwGmKPuILEsTjoXho'
 ADMIN_ID = 7793812954
 MONGO_URL = "mongodb+srv://botuser:<db_password>@cluster0.xdoda3m.mongodb.net/?appName=Cluster0" # 👈 Paste your MongoDB URI here
 PLUGIN_DIR = "plugins"
