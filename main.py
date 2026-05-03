@@ -3,7 +3,7 @@ import asyncio
 import time
 import datetime
 
-from aiogram import Bot, Dispatcher, types, F, Router
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
@@ -11,21 +11,23 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from fastapi import FastAPI
 import uvicorn
-import threading
 
 # =========================
-# CONFIG
+# ENVIRONMENT VARIABLES (RENDER SAFE)
 # =========================
 
-TOKEN = "8523644793:AAGqHoxIdblgyCKvucU-5exjaaSweSaFvEc"
-ADMIN_ID = 7793812954
-MONGO_URL = "mongodb+srv://botuser:<db_password>@cluster0.xdoda3m.mongodb.net/?appName=Cluster0"
+TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+MONGO_URL = os.environ.get("MONGO_URL")
 
-BASE_DIR = "storage"
-PLUGIN_DIR = "plugins"
+PORT = int(os.environ.get("PORT", 10000))
 
-os.makedirs(BASE_DIR, exist_ok=True)
-os.makedirs(PLUGIN_DIR, exist_ok=True)
+# =========================
+# SAFETY CHECK
+# =========================
+
+if not TOKEN or not MONGO_URL:
+    raise Exception("❌ Missing ENV variables (BOT_TOKEN / MONGO_URL)")
 
 # =========================
 # BOT + DB
@@ -41,13 +43,17 @@ users = db["users"]
 files_db = db["files"]
 system_db = db["system"]
 
+BASE_DIR = "storage"
+os.makedirs(BASE_DIR, exist_ok=True)
+
+START_TIME = time.time()
+
 # =========================
-# UPTIME PERSISTENT SYSTEM (IMPORTANT)
+# UPTIME SYSTEM (PERSISTENT)
 # =========================
 
 async def init_uptime():
     doc = await system_db.find_one({"key": "uptime"})
-
     if not doc:
         await system_db.insert_one({
             "key": "uptime",
@@ -59,7 +65,7 @@ async def get_uptime():
     return time.time() - doc["start"]
 
 # =========================
-# FASTAPI (RENDER KEEP ALIVE)
+# WEB SERVER (RENDER KEEP ALIVE)
 # =========================
 
 app = FastAPI()
@@ -72,14 +78,11 @@ def home():
 def ping():
     return {"pong": True}
 
-def run_web():
-    uvicorn.run(app, host="0.0.0.0", port=10000)
-
 # =========================
 # USER INIT
 # =========================
 
-async def init_user(user):
+async def init_user(user: types.User):
     await users.update_one(
         {"id": user.id},
         {"$setOnInsert": {
@@ -92,7 +95,7 @@ async def init_user(user):
     )
 
 # =========================
-# STORAGE
+# USER STORAGE
 # =========================
 
 def user_path(uid):
@@ -106,15 +109,14 @@ def user_path(uid):
 
 @dp.message(Command("start"))
 async def start(m: types.Message):
-
     await init_user(m.from_user)
 
     await m.answer(
         "💀 SYSTEM ONLINE\n"
         "━━━━━━━━━━━━━━\n"
-        "⚡ Persistent Uptime Enabled\n"
-        "⚙ MongoDB Active\n"
-        "📦 SaaS System Running"
+        "⚡ Render Safe Mode Active\n"
+        "🗄 MongoDB Connected\n"
+        "🚀 SaaS Ready"
     )
 
 # =========================
@@ -123,7 +125,6 @@ async def start(m: types.Message):
 
 @dp.message(Command("help"))
 async def help_cmd(m: types.Message):
-
     await m.answer(
         "📦 COMMANDS:\n\n"
         "/files\n"
@@ -166,7 +167,6 @@ async def upload(m: types.Message):
 
 @dp.message(Command("files"))
 async def list_files(m: types.Message):
-
     path = user_path(str(m.from_user.id))
     files = os.listdir(path)
 
@@ -198,7 +198,7 @@ async def read_file(m: types.Message):
     await m.answer(content[:3000])
 
 # =========================
-# DELETE
+# DELETE FILE
 # =========================
 
 @dp.message(Command("delete"))
@@ -218,7 +218,7 @@ async def delete_file(m: types.Message):
     await m.answer("❌ Not found")
 
 # =========================
-# RENAME
+# RENAME FILE
 # =========================
 
 @dp.message(Command("rename"))
@@ -240,28 +240,24 @@ async def rename_file(m: types.Message):
     await m.answer("❌ Not found")
 
 # =========================
-# UPTIME COMMAND (REAL PERSISTENT)
+# UPTIME
 # =========================
 
 @dp.message(Command("uptime"))
 async def uptime_cmd(m: types.Message):
-
     up = await get_uptime()
-    uptime = str(datetime.timedelta(seconds=int(up)))
-
-    await m.answer(f"⏱ Uptime: {uptime}")
+    await m.answer(f"⏱ Uptime: {str(datetime.timedelta(seconds=int(up)))}")
 
 # =========================
-# AUTO RECONNECT BOT LOOP
+# BOT LOOP (RECONNECT SAFE)
 # =========================
 
 async def run_bot():
     while True:
         try:
-            print("💀 BOT STARTED")
             await dp.start_polling(bot)
         except Exception as e:
-            print("RESTARTING BOT:", e)
+            print("RESTART BOT:", e)
             await asyncio.sleep(3)
 
 # =========================
@@ -272,11 +268,14 @@ async def main():
 
     await init_uptime()
 
-    # web server thread (keep alive)
-    threading.Thread(target=run_web, daemon=True).start()
+    config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
+    server = uvicorn.Server(config)
 
-    # bot run loop
-    await run_bot()
+    # web + bot together
+    await asyncio.gather(
+        server.serve(),
+        run_bot()
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
